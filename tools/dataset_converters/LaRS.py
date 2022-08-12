@@ -116,6 +116,7 @@ def load_img_info(files):
 
     # Save RGB id mask
     seg_mask_rgb = id2rgb(seg_mask)
+    seg_mask_rgb = mmcv.image.colorspace.rgb2bgr(seg_mask_rgb) # MMCV assumes BGR
     mmcv.imwrite(seg_mask_rgb, out_seg_file, auto_mkdir=True)
 
     img_info = dict(
