@@ -14,7 +14,7 @@ except ImportError:
 
 THINGS_START=100
 IGNORE_I = 4
-DYN_OBST_I = 3
+DYN_OBST_I = 1 # MMDetection expects things classes to be at the start. 0 is ignored.
 
 def rand_color(existing):
     color = None
@@ -67,7 +67,7 @@ def load_img_info(files):
         if cat_id == IGNORE_I:
             continue
 
-        category_id = cat_id
+        category_id = cat_id + 2 # Stuff IDs start with 2
         mask = np.asarray(seg_img == cat_id, dtype=np.uint8, order='F')
         mask_rle = maskUtils.encode(mask[:, :, None])[0]
 
@@ -150,10 +150,10 @@ def cvt_annotations(image_infos, out_json_name):
         img_id += 1
 
     out_json['categories'] = [
-        dict(id=0, name='static_obstacle', isthing=0),
-        dict(id=1, name='water', isthing=0),
-        dict(id=2, name='sky', isthing=0),
-        dict(id=3, name='dynamic_obstacle', isthing=1)
+        dict(id=1, name='dynamic_obstacle', isthing=1),
+        dict(id=2, name='static_obstacle', isthing=0),
+        dict(id=3, name='water', isthing=0),
+        dict(id=4, name='sky', isthing=0)
     ]
 
     if len(out_json['annotations']) == 0:
