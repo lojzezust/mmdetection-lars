@@ -1,11 +1,12 @@
 
-interval = 200
+interval = 500
 checkpoint_config = dict(by_epoch=False, interval=interval, save_last=True, max_keep_ckpts=3)
 # yapf:disable
 
 wandb_logger = dict(
     type='WandbLoggerHook',
     by_epoch=False,
+    with_step=False,
     init_kwargs=dict(project='mmdetection'))
 
 log_config = dict(

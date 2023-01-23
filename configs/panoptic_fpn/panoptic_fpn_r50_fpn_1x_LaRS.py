@@ -7,7 +7,7 @@ model = dict(
     type='PanopticFPN',
     semantic_head=dict(
         type='PanopticFPNHead',
-        num_things_classes=1,
+        num_things_classes=8,
         num_stuff_classes=3,
         in_channels=256,
         inner_channels=128,
@@ -19,7 +19,7 @@ model = dict(
             type='CrossEntropyLoss', ignore_index=255, loss_weight=0.5)),
     panoptic_fusion_head=dict(
         type='HeuristicFusionHead',
-        num_things_classes=1,
+        num_things_classes=8,
         num_stuff_classes=3),
     test_cfg=dict(
         panoptic=dict(

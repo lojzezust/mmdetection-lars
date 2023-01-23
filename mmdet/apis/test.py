@@ -1,9 +1,12 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os.path as osp
+import os
 import pickle
 import shutil
 import tempfile
 import time
+import numpy as np
+from PIL import Image
 
 import mmcv
 import torch
@@ -12,6 +15,31 @@ from mmcv.image import tensor2imgs
 from mmcv.runner import get_dist_info
 
 from mmdet.core import encode_mask_results
+
+LARS_CLASS_MAP = {
+    1: 11, # Boat/ship
+    2: 12, # Row boat
+    3: 13, # Paddle board
+    4: 14, # Buoy
+    5: 15, # Swimmer
+    6: 16, # Animal
+    7: 17, # Float
+    8: 19, # Other
+    9: 1, # Static Obstacle
+    10: 3, # Water
+    11: 5, # Sky
+    12: 0 # VOID
+}
+
+def export_prediction(result, out_file, instance_divisor=1000):
+    mask = result['pan_results']
+    class_id = mask % instance_divisor
+    class_id = np.vectorize(LARS_CLASS_MAP.__getitem__)(class_id + 1)
+    inst_id = mask // instance_divisor
+
+    rgb = np.stack([class_id, inst_id // 256, inst_id % 256], axis=2).astype(np.uint8)
+    img = Image.fromarray(rgb)
+    img.save(out_file)
 
 
 def single_gpu_test(model,
@@ -47,6 +75,14 @@ def single_gpu_test(model,
 
                 if out_dir:
                     out_file = osp.join(out_dir, img_meta['ori_filename'])
+
+                    # Export raw predictions
+                    raw_dir = out_dir + '_raw'
+                    if not osp.exists(raw_dir):
+                        os.makedirs(raw_dir)
+
+                    out_file_raw = osp.join(raw_dir, osp.splitext(img_meta['ori_filename'])[0] + '.png')
+                    export_prediction(result[i], out_file_raw)
                 else:
                     out_file = None
 
