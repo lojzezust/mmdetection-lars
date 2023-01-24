@@ -16,7 +16,7 @@ from mmdet.models import build_detector
 from mmdet.utils import (build_dp, compat_cfg, get_device,
                          replace_cfg_vals, update_data_root)
 
-NUM_SAMPLES = 200
+NUM_SAMPLES = None
 NUM_REPEATS = 5
 OUTPUT_DIR = 'output/latency'
 
@@ -24,7 +24,7 @@ def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('config', type=str, help='Path to the model configuration file')
     parser.add_argument('-n', '--num_samples', type=int, default=NUM_SAMPLES,
-                        help='Number of data samples used in the test.')
+                        help='Number of data samples used in the test. If not defined, all samples are used.')
     parser.add_argument('-r', '--repeats', type=int, default=NUM_REPEATS,
                         help='Number of repetitions.')
     parser.add_argument('-o', '--output_dir', type=str, default=OUTPUT_DIR,
@@ -67,9 +67,6 @@ def eval_inference_time(args):
                 cfg.model.neck.rfp_backbone.pretrained = None
 
 
-    # Build dataset
-    dataset = build_dataset(cfg.data.test)
-
     cfg.gpu_ids = [0]
     cfg.device = get_device()
 
@@ -81,9 +78,11 @@ def eval_inference_time(args):
         **cfg.data.get('test_dataloader', {})
     }
 
+    # Set test mode (to get all images)
+    cfg.data.val.test_mode = True
 
     # build the dataloader
-    dataset = build_dataset(cfg.data.test)
+    dataset = build_dataset(cfg.data.val)
     data_loader = build_dataloader(dataset, **test_loader_cfg)
 
     # build the model and load checkpoint
@@ -105,9 +104,11 @@ def eval_inference_time(args):
     # Preload data
     data = []
     for i,d in tqdm(enumerate(data_loader), desc='Reading data', total=args.num_samples):
-        if i >= args.num_samples:
+        if args.num_samples is not None and i >= args.num_samples:
             break
         data.append(d)
+
+    args.num_samples = len(data)
 
 
     with torch.no_grad():
