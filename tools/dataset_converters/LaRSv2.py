@@ -10,7 +10,7 @@ def parse_args():
     parser.add_argument('dataset_root', help='LaRS dataset (split) root path')
     parser.add_argument('--annotation_file', default='panoptic_annotations.json', type=str)
     parser.add_argument('--output_file', default='mmdet_annotations.json', type=str)
-    parser.add_argument('--splits', default=['train', 'val', 'test'], type=str, nargs='+')
+    parser.add_argument('--splits', default=['train', 'val', 'test', 'all'], type=str, nargs='+')
     args = parser.parse_args()
     return args
 
