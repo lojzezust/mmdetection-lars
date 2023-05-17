@@ -4,11 +4,12 @@ from typing import Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchvision.transforms.functional as TF
 from mmcv.cnn import PLUGIN_LAYERS, Conv2d, ConvModule, caffe2_xavier_init
 from mmcv.cnn.bricks.transformer import (build_positional_encoding,
                                          build_transformer_layer_sequence)
 from mmcv.runner import BaseModule, ModuleList
-
+from ..builder import build_loss
 
 def _get_nms_kernel2d(kx: int, ky: int) -> torch.Tensor:
     """Get conv kernel for NMS."""
@@ -112,6 +113,9 @@ class ProposalGenerator(BaseModule):
                  max_samples=512,
                  norm_cfg=dict(type='GN', num_groups=32),
                  act_cfg=dict(type='ReLU'),
+                 loss_center=dict(type='CrossEntropyLoss',
+                                  use_sigmoid=True,
+                                  loss_weight=1.0),
                  init_cfg=None):
         super().__init__(init_cfg=init_cfg)
         self.in_channels = in_channels
@@ -142,21 +146,30 @@ class ProposalGenerator(BaseModule):
             padding=1,
             bias=self.use_bias,
             norm_cfg=None,
-            act_cfg=dict(type='Sigmoid'))
+            act_cfg=None)
         self.layers.append(conv_out)
+
+        self.loss_center = build_loss(loss_center)
 
     def init_weights(self):
         """Initialize weights."""
         for i in range(self.num_layers):
             caffe2_xavier_init(self.layers[i].conv, bias=0)
 
+    def loss(self, center_preds, gt_centers):
+        """Compute proposal generator (center prediction) loss."""
 
-    def forward(self, multilevel_feats, positional_encodings):
+        return self.loss_center(center_preds, gt_centers)
+
+
+    def forward(self, multilevel_feats, positional_encodings, gt_center_mask=None):
         """
         Args:
             multilevel_feats (list[Tensor]): Feature maps of each level. Each has
                 shape of (batch_size, c, h, w).
             positional_encodings (list[Tensor]): Positional encodings of each level.
+                Each has shape of (batch_size, c, h, w).
+            gt_center_mask (list[Tensor], optional): GT center mask (only during training).
         Returns:
             tuple: a tuple containing the following:
                 feats_sel (Tensor): Selected features with shape of
@@ -166,18 +179,26 @@ class ProposalGenerator(BaseModule):
                 valid_mask (Tensor): Valid mask of selected features with shape of
                     (batch_size, num_samples).
         """
+
+
         feats_orig = multilevel_feats[self.level]
-        feats = feats_orig
+        preds = feats_orig
         pos = positional_encodings[self.level]
         for i in range(self.num_layers):
-            feats = self.layers[i](feats)
+            preds = self.layers[i](preds)
 
-        # Non-maximum suppression on feats
-        center_mask = self.nms_conv(feats, mask_only=True)
+
+        if gt_center_mask is None:
+            # Non-maximum suppression on predicted centers
+            probs = torch.sigmoid(preds)
+            center_mask = self.nms_conv(preds, mask_only=True)
+        else:
+            center_mask = TF.resize(gt_center_mask, preds.shape[-2:])
+            center_mask = self.nms_conv(center_mask, mask_only=True)
 
         # Sample features
         feats_sel, valid_mask = _select_and_pad_feats(feats_orig, center_mask, self.max_samples)
         pos_sel, _ = _select_and_pad_feats(pos, center_mask, self.max_samples)
 
-        return feats_sel, pos_sel, valid_mask
+        return feats_sel, pos_sel, valid_mask, preds
 

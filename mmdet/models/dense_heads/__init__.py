@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from .anchor_free_head import AnchorFreeHead
 from .anchor_head import AnchorHead
+from .anchorformer_head import AnchorFormerHead
 from .ascend_anchor_head import AscendAnchorHead
 from .ascend_retina_head import AscendRetinaHead
 from .ascend_ssd_head import AscendSSDHead
@@ -46,7 +47,7 @@ from .yolof_head import YOLOFHead
 from .yolox_head import YOLOXHead
 
 __all__ = [
-    'AnchorFreeHead', 'AnchorHead', 'GuidedAnchorHead', 'FeatureAdaption',
+    'AnchorFreeHead', 'AnchorHead', 'AnchorFormerHead', 'GuidedAnchorHead', 'FeatureAdaption',
     'RPNHead', 'GARPNHead', 'RetinaHead', 'RetinaSepBNHead', 'GARetinaHead',
     'SSDHead', 'FCOSHead', 'RepPointsHead', 'FoveaHead',
     'FreeAnchorRetinaHead', 'ATSSHead', 'FSAFHead', 'NASFCOSHead',

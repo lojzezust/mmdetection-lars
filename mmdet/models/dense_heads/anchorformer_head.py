@@ -64,6 +64,7 @@ class AnchorFormerHead(MaskFormerHead):
                  num_queries=100,
                  num_transformer_feat_level=3,
                  pixel_decoder=None,
+                 proposal_head=None,
                  enforce_decoder_input_project=False,
                  transformer_decoder=None,
                  positional_encoding=None,
@@ -91,6 +92,13 @@ class AnchorFormerHead(MaskFormerHead):
             feat_channels=feat_channels,
             out_channels=out_channels)
         self.pixel_decoder = build_plugin_layer(pixel_decoder_)[1]
+
+        # AnchorFormer: proposal head
+        proposal_head.update(
+            in_channels=[feat_channels] * num_transformer_feat_level,
+            feat_channels=feat_channels)
+        self.proposal_head = build_plugin_layer(proposal_head)[1]
+
         self.transformer_decoder = build_transformer_layer_sequence(
             transformer_decoder)
         self.decoder_embed_dims = self.transformer_decoder.embed_dims
@@ -306,6 +314,16 @@ class AnchorFormerHead(MaskFormerHead):
 
         return loss_cls, loss_mask, loss_dice
 
+    def loss(self, all_cls_scores, all_mask_preds, center_preds,
+             gt_labels_list, gt_masks_list, gt_centers, img_metas):
+
+        # Compute Mask2Former losses
+        loss_dict = super().loss(all_cls_scores, all_mask_preds, gt_labels_list,
+                        gt_masks_list, img_metas)
+
+        # Add loss for proposal generator
+        loss_dict['loss_center'] = self.proposal_head.loss(center_preds, gt_centers)
+
     def forward_head(self, decoder_out, mask_feature, attn_mask_target_size):
         """Forward for head part which is called after every decoder layer.
 
@@ -348,7 +366,65 @@ class AnchorFormerHead(MaskFormerHead):
 
         return cls_pred, mask_pred, attn_mask
 
-    def forward(self, feats, img_metas):
+    def preprocess_gt(self, gt_labels_list, gt_masks_list, gt_semantic_segs, img_metas, gt_centers):
+        """Preprocess the ground truth for all images."""
+        labels, masks = super().preprocess_gt(gt_labels_list, gt_masks_list, gt_semantic_segs, img_metas)
+
+        gt_centers = gt_centers.unsqueeze(1)
+
+        return labels, masks, gt_centers
+
+    def forward_train(self,
+                      feats,
+                      img_metas,
+                      gt_bboxes,
+                      gt_labels,
+                      gt_masks,
+                      gt_semantic_seg,
+                      gt_bboxes_ignore=None,
+                      gt_centers=None):
+        """Forward function for training mode.
+
+        Args:
+            feats (list[Tensor]): Multi-level features from the upstream
+                network, each is a 4D-tensor.
+            img_metas (list[Dict]): List of image information.
+            gt_bboxes (list[Tensor]): Each element is ground truth bboxes of
+                the image, shape (num_gts, 4). Not used here.
+            gt_labels (list[Tensor]): Each element is ground truth labels of
+                each box, shape (num_gts,).
+            gt_masks (list[BitmapMasks]): Each element is masks of instances
+                of a image, shape (num_gts, h, w).
+            gt_semantic_seg (list[tensor] | None): Each element is the ground
+                truth of semantic segmentation with the shape (N, H, W).
+                [0, num_thing_class - 1] means things,
+                [num_thing_class, num_class-1] means stuff,
+                255 means VOID. It's None when training instance segmentation.
+            gt_bboxes_ignore (list[Tensor]): Ground truth bboxes to be
+                ignored. Defaults to None.
+            gt_centers (list[Tensor]): Ground truth centers of instances (mask)
+        Returns:
+            dict[str, Tensor]: a dictionary of loss components
+        """
+        # not consider ignoring bboxes
+        assert gt_bboxes_ignore is None
+
+
+        # preprocess ground truth
+        gt_labels, gt_masks, gt_center_masks = self.preprocess_gt(gt_labels, gt_masks,
+                                                 gt_semantic_seg, img_metas, gt_centers)
+
+        # forward
+        all_cls_scores, all_mask_preds, center_preds = self(feats, img_metas, gt_centers=gt_center_masks)
+
+
+        # loss
+        losses = self.loss(all_cls_scores, all_mask_preds, center_preds,
+                           gt_labels, gt_masks, gt_center_masks, img_metas)
+
+        return losses
+
+    def forward(self, feats, img_metas, gt_centers=None):
         """Forward function.
 
         Args:
@@ -372,6 +448,7 @@ class AnchorFormerHead(MaskFormerHead):
         # multi_scale_memorys (from low resolution to high resolution)
         decoder_inputs = []
         decoder_positional_encodings = []
+        decoder_positional_encodings_2d = []
         for i in range(self.num_transformer_feat_level):
             decoder_input = self.decoder_input_projs[i](multi_scale_memorys[i])
             # shape (batch_size, c, h, w) -> (h*w, batch_size, c)
@@ -384,6 +461,7 @@ class AnchorFormerHead(MaskFormerHead):
                 dtype=torch.bool)
             decoder_positional_encoding = self.decoder_positional_encoding(
                 mask)
+            decoder_positional_encodings_2d.append(decoder_positional_encoding)
             decoder_positional_encoding = decoder_positional_encoding.flatten(
                 2).permute(2, 0, 1)
             decoder_inputs.append(decoder_input)
@@ -393,6 +471,9 @@ class AnchorFormerHead(MaskFormerHead):
             (1, batch_size, 1))
         query_embed = self.query_embed.weight.unsqueeze(1).repeat(
             (1, batch_size, 1))
+
+        # AnchorFormer: generate object proposals
+        feats_sel, pos_sel, valid_mask, center_preds = self.proposal_head(multi_scale_memorys, decoder_positional_encodings_2d, gt_centers)
 
         cls_pred_list = []
         mask_pred_list = []
@@ -427,4 +508,4 @@ class AnchorFormerHead(MaskFormerHead):
             cls_pred_list.append(cls_pred)
             mask_pred_list.append(mask_pred)
 
-        return cls_pred_list, mask_pred_list
+        return cls_pred_list, mask_pred_list, center_preds

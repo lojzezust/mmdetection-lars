@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from .atss import ATSS
 from .autoassign import AutoAssign
+from .anchorformer import AnchorFormer
 from .base import BaseDetector
 from .cascade_rcnn import CascadeRCNN
 from .centernet import CenterNet
@@ -54,5 +55,5 @@ __all__ = [
     'VFNet', 'DETR', 'TridentFasterRCNN', 'SparseRCNN', 'SCNet', 'SOLO',
     'SOLOv2', 'DeformableDETR', 'AutoAssign', 'YOLOF', 'CenterNet', 'YOLOX',
     'TwoStagePanopticSegmentor', 'PanopticFPN', 'QueryInst', 'LAD', 'TOOD',
-    'MaskFormer', 'DDOD', 'Mask2Former'
+    'MaskFormer', 'DDOD', 'Mask2Former', 'AnchorFormer'
 ]
