@@ -39,7 +39,11 @@ class ObjectCenters(object):
         for mask in results['gt_masks'].masks:
             x,y = np.where(mask)
             if np.isnan(x).any() or np.isnan(y).any():
-                print('Nan in mask')
+                print('WARN: Nan in mask')
+
+            if len(x) == 0:
+                continue # TODO: this should not happen
+
             xm, ym = int(np.mean(x).round()), int(np.mean(y).round())
 
             center_mask[xm, ym] = 1. # Seed point
@@ -48,7 +52,7 @@ class ObjectCenters(object):
         center_mask = cv2.GaussianBlur(center_mask, (0,0), self.sigma)
 
         # Normalize
-        if self.normalize:
+        if self.normalize and np.max(center_mask) > 0:
             center_mask = center_mask / np.max(center_mask)
 
         results['gt_centers'] = center_mask

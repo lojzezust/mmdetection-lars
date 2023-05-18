@@ -324,6 +324,8 @@ class AnchorFormerHead(MaskFormerHead):
         # Add loss for proposal generator
         loss_dict['loss_center'] = self.proposal_head.loss(center_preds, gt_centers)
 
+        return loss_dict
+
     def forward_head(self, decoder_out, mask_feature, attn_mask_target_size):
         """Forward for head part which is called after every decoder layer.
 

@@ -159,6 +159,8 @@ class ProposalGenerator(BaseModule):
     def loss(self, center_preds, gt_centers):
         """Compute proposal generator (center prediction) loss."""
 
+        center_preds = TF.resize(center_preds, gt_centers.shape[2:])
+
         return self.loss_center(center_preds, gt_centers)
 
 
