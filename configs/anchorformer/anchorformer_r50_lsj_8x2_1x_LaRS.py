@@ -168,7 +168,7 @@ train_pipeline = [
     dict(
         type='Resize',
         img_scale=image_size,
-        ratio_range=(0.1, 2.0),
+        ratio_range=(0.5, 2.0),
         multiscale_mode='range',
         keep_ratio=True),
     dict(
