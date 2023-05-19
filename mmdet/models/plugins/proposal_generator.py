@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from typing import Tuple
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -49,6 +50,75 @@ def _select_and_pad_feats(feats, masks, num_samples=512):
 
     return feats_sel, feats_sel_valid
 
+
+class PointSinePositionalEncoding(BaseModule):
+    """Position encoding with sine and cosine functions.
+
+    See `End-to-End Object Detection with Transformers
+    <https://arxiv.org/pdf/2005.12872>`_ for details.
+
+    Args:
+        num_feats (int): The feature dimension for each position
+            along x-axis or y-axis. Note the final returned dimension
+            for each position is 2 times of this value.
+        temperature (int, optional): The temperature used for scaling
+            the position embedding. Defaults to 10000.
+        normalize (bool, optional): Whether to normalize the position
+            embedding. Defaults to False.
+        scale (float, optional): A scale factor that scales the position
+            embedding. The scale will be used only when `normalize` is True.
+            Defaults to 2*pi.
+        eps (float, optional): A value added to the denominator for
+            numerical stability. Defaults to 1e-6.
+        offset (float): offset add to embed when do the normalization.
+            Defaults to 0.
+        init_cfg (dict or list[dict], optional): Initialization config dict.
+            Default: None
+    """
+
+    def __init__(self,
+                 num_feats,
+                 temperature=10000,
+                 normalize=False,
+                 scale=2 * math.pi,
+                 eps=1e-6,
+                 offset=0.,
+                 init_cfg=None):
+        super().__init__(init_cfg=init_cfg)
+        if normalize:
+            assert isinstance(scale, (float, int)), 'when normalize is set,' \
+                'scale should be provided and in float or int type, ' \
+                f'found {type(scale)}'
+        self.num_feats = num_feats
+        self.temperature = temperature
+        self.normalize = normalize
+        self.scale = scale
+        self.eps = eps
+        self.offset = offset
+
+    def forward(self, points, size):
+        N, _ = points.shape
+        if N == 0:
+            return torch.zeros((0, self.num_feats * 2), device=points.device)
+
+        H, W = size
+        x_embed = points[:,0]
+        y_embed = points[:,1]
+        if self.normalize:
+            y_embed = (y_embed + self.offset) / (H + self.eps) * self.scale
+            x_embed = (x_embed + self.offset) / (W + self.eps) * self.scale
+
+        dim_t = torch.arange(self.num_feats, dtype=torch.float32, device=points.device)
+        dim_t = self.temperature**(2 * (dim_t // 2) / self.num_feats)
+
+        pos_x = x_embed[:,None] / dim_t
+        pos_y = y_embed[:,None] / dim_t
+
+        pos_x = torch.stack((pos_x[:, 0::2].sin(), pos_x[:, 1::2].cos()), dim=2).view(N, -1)
+        pos_y = torch.stack((pos_y[:, 0::2].sin(), pos_y[:, 1::2].cos()), dim=2).view(N, -1)
+
+        pos = torch.cat((pos_y, pos_x), dim=1)
+        return pos
 
 
 class NonMaximaSuppression2d(nn.Module):
@@ -110,7 +180,7 @@ class ProposalGenerator(BaseModule):
                  num_layers,
                  level=1,
                  nms_kernel_size=(3, 3),
-                 max_samples=512,
+                 max_samples=50,
                  norm_cfg=dict(type='GN', num_groups=32),
                  act_cfg=dict(type='ReLU'),
                  loss_center=dict(type='CrossEntropyLoss',
@@ -124,6 +194,7 @@ class ProposalGenerator(BaseModule):
         self.level = level
         self.max_samples = max_samples
         self.nms_conv = NonMaximaSuppression2d(nms_kernel_size)
+        self.pos_encoder = PointSinePositionalEncoding(feat_channels//2, normalize=True)
 
         self.layers = ModuleList()
         self.use_bias = norm_cfg is None
@@ -162,6 +233,37 @@ class ProposalGenerator(BaseModule):
         center_preds = TF.resize(center_preds, gt_centers.shape[2:])
 
         return self.loss_center(center_preds, gt_centers)
+
+    def forward_train(self, gt_bboxes_list, size):
+        """Forward function during training."""
+
+        pos_enc_list = []
+        gt_i_list = []
+        for gt_bboxes in gt_bboxes_list:
+            N = gt_bboxes.shape[0]
+            gt_centers = (gt_bboxes[:,:2] + gt_bboxes[:,2:])/2.
+            pos_enc = self.pos_encoder(gt_centers, size) # N, C
+
+            gt_i = torch.arange(N, device=pos_enc.device, dtype=torch.long)
+
+            # Randomly shuffle the order of the points (this should not matter)
+            if N > 0:
+                perm = torch.randperm(N, device=pos_enc.device)
+                pos_enc = pos_enc[perm]
+                gt_i = gt_i[perm]
+
+            if N < self.max_samples:
+                pos_enc = F.pad(pos_enc, (0, 0, 0, self.max_samples - N))
+                gt_i = F.pad(gt_i, (0, self.max_samples - N), value=-1)
+                N = self.max_samples
+
+            pos_enc_list.append(pos_enc[:self.max_samples])
+            gt_i_list.append(gt_i[:self.max_samples])
+
+        pos_enc = torch.stack(pos_enc_list, dim=1)
+        gt_i = torch.stack(gt_i_list)
+
+        return pos_enc, gt_i
 
 
     def forward(self, multilevel_feats, positional_encodings, gt_center_mask=None):

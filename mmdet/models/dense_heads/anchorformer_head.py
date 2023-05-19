@@ -61,7 +61,8 @@ class AnchorFormerHead(MaskFormerHead):
                  out_channels,
                  num_things_classes=80,
                  num_stuff_classes=53,
-                 num_queries=100,
+                 num_queries=50,
+                 num_proposals=50,
                  num_transformer_feat_level=3,
                  pixel_decoder=None,
                  proposal_head=None,
@@ -80,6 +81,7 @@ class AnchorFormerHead(MaskFormerHead):
         self.num_stuff_classes = num_stuff_classes
         self.num_classes = self.num_things_classes + self.num_stuff_classes
         self.num_queries = num_queries
+        self.num_proposals = num_proposals
         self.num_transformer_feat_level = num_transformer_feat_level
         self.num_heads = transformer_decoder.transformerlayers.\
             attn_cfgs.num_heads
@@ -96,7 +98,8 @@ class AnchorFormerHead(MaskFormerHead):
         # AnchorFormer: proposal head
         proposal_head.update(
             in_channels=[feat_channels] * num_transformer_feat_level,
-            feat_channels=feat_channels)
+            feat_channels=feat_channels,
+            max_samples=num_proposals)
         self.proposal_head = build_plugin_layer(proposal_head)[1]
 
         self.transformer_decoder = build_transformer_layer_sequence(
@@ -209,15 +212,15 @@ class AnchorFormerHead(MaskFormerHead):
         neg_inds = sampling_result.neg_inds
 
         # label target
-        labels = gt_labels.new_full((self.num_queries, ),
+        labels = gt_labels.new_full((self.num_queries + self.num_proposals, ),
                                     self.num_classes,
                                     dtype=torch.long)
         labels[pos_inds] = gt_labels[sampling_result.pos_assigned_gt_inds]
-        label_weights = gt_labels.new_ones((self.num_queries, ))
+        label_weights = gt_labels.new_ones((self.num_queries + self.num_proposals, ))
 
         # mask target
         mask_targets = gt_masks[sampling_result.pos_assigned_gt_inds]
-        mask_weights = mask_pred.new_zeros((self.num_queries, ))
+        mask_weights = mask_pred.new_zeros((self.num_queries + self.num_proposals, ))
         mask_weights[pos_inds] = 1.0
 
         return (labels, label_weights, mask_targets, mask_weights, pos_inds,
@@ -417,7 +420,7 @@ class AnchorFormerHead(MaskFormerHead):
                                                  gt_semantic_seg, img_metas, gt_centers)
 
         # forward
-        all_cls_scores, all_mask_preds, center_preds = self(feats, img_metas, gt_centers=gt_center_masks)
+        all_cls_scores, all_mask_preds, center_preds = self(feats, img_metas, gt_centers=gt_center_masks, gt_bboxes=gt_bboxes)
 
 
         # loss
@@ -426,7 +429,7 @@ class AnchorFormerHead(MaskFormerHead):
 
         return losses
 
-    def forward(self, feats, img_metas, gt_centers=None):
+    def forward(self, feats, img_metas, gt_centers=None, gt_bboxes=None):
         """Forward function.
 
         Args:
@@ -473,9 +476,20 @@ class AnchorFormerHead(MaskFormerHead):
             (1, batch_size, 1))
         query_embed = self.query_embed.weight.unsqueeze(1).repeat(
             (1, batch_size, 1))
+        query_feat_mask = torch.zeros((batch_size, self.num_queries), dtype=torch.bool, device=query_embed.device)
+
 
         # AnchorFormer: generate object proposals
         feats_sel, pos_sel, valid_mask, center_preds = self.proposal_head(multi_scale_memorys, decoder_positional_encodings_2d, gt_centers)
+
+        # Step 1: Get pos encoding for each proposal
+        query_proposal_embed, gt_idx = self.proposal_head.forward_train(gt_bboxes, size=gt_centers.shape[-2:])
+        query_embed = torch.cat([query_embed, query_proposal_embed], dim=0) # (num_queries + num_proposals, batch_size, c)
+        query_feat_mask = torch.cat([query_feat_mask, gt_idx==-1], dim=1)
+
+        # Step 2: Initialize proposal features to 0
+        query_proposal_feat = torch.zeros_like(query_proposal_embed, device=query_feat.device)
+        query_feat = torch.cat([query_feat, query_proposal_feat], dim=0) # (num_queries + num_proposals, batch_size, c)
 
         cls_pred_list = []
         mask_pred_list = []
@@ -483,6 +497,11 @@ class AnchorFormerHead(MaskFormerHead):
             query_feat, mask_features, multi_scale_memorys[0].shape[-2:])
         cls_pred_list.append(cls_pred)
         mask_pred_list.append(mask_pred)
+
+        # Step 3: Set initial mask predictions for proposals to 0
+        cls_pred[:, self.num_queries:] = 0
+        mask_pred[:, self.num_queries:] = 0
+        attn_mask[:, self.num_queries:] = 0
 
         for i in range(self.num_transformer_decoder_layers):
             level_idx = i % self.num_transformer_feat_level
@@ -500,7 +519,7 @@ class AnchorFormerHead(MaskFormerHead):
                 query_pos=query_embed,
                 key_pos=decoder_positional_encodings[level_idx],
                 attn_masks=attn_masks,
-                query_key_padding_mask=None,
+                query_key_padding_mask=query_feat_mask,
                 # here we do not apply masking on padded region
                 key_padding_mask=None)
             cls_pred, mask_pred, attn_mask = self.forward_head(
@@ -511,3 +530,36 @@ class AnchorFormerHead(MaskFormerHead):
             mask_pred_list.append(mask_pred)
 
         return cls_pred_list, mask_pred_list, center_preds
+
+    def simple_test(self, feats, img_metas, gt_centers=None, gt_bboxes=None, **kwargs):
+        """Test without augmentaton.
+
+        Args:
+            feats (list[Tensor]): Multi-level features from the
+                upstream network, each is a 4D-tensor.
+            img_metas (list[dict]): List of image information.
+
+        Returns:
+            tuple: A tuple contains two tensors.
+
+            - mask_cls_results (Tensor): Mask classification logits,\
+                shape (batch_size, num_queries, cls_out_channels).
+                Note `cls_out_channels` should includes background.
+            - mask_pred_results (Tensor): Mask logits, shape \
+                (batch_size, num_queries, h, w).
+        """
+
+        gt_centers = gt_centers[0].unsqueeze(1)
+        all_cls_scores, all_mask_preds, center_preds = self(feats, img_metas, gt_centers, gt_bboxes[0])
+        mask_cls_results = all_cls_scores[-1]
+        mask_pred_results = all_mask_preds[-1]
+
+        # upsample masks
+        img_shape = img_metas[0]['batch_input_shape']
+        mask_pred_results = F.interpolate(
+            mask_pred_results,
+            size=(img_shape[0], img_shape[1]),
+            mode='bilinear',
+            align_corners=False)
+
+        return mask_cls_results, mask_pred_results
