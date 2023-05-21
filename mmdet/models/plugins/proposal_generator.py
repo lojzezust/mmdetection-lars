@@ -263,7 +263,7 @@ class ProposalGenerator(BaseModule):
         pos_enc = torch.stack(pos_enc_list, dim=1)
         gt_i = torch.stack(gt_i_list)
 
-        return pos_enc, gt_i
+        return pos_enc.detach(), gt_i.detach()
 
 
     def forward(self, multilevel_feats, positional_encodings, gt_center_mask=None):
