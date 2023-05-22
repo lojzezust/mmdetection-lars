@@ -483,9 +483,18 @@ class AnchorFormerHead(MaskFormerHead):
         feats_sel, pos_sel, valid_mask, center_preds = self.proposal_head(multi_scale_memorys, decoder_positional_encodings_2d, gt_centers)
 
         # Step 1: Get pos encoding for each proposal
-        query_proposal_embed, gt_idx = self.proposal_head.forward_train(gt_bboxes, size=gt_centers.shape[-2:])
+        query_proposal_embed, gt_idx, proposal_masks = self.proposal_head.forward_train(gt_bboxes, size=gt_centers.shape[-2:])
         query_embed = torch.cat([query_embed, query_proposal_embed], dim=0) # (num_queries + num_proposals, batch_size, c)
         query_feat_mask = torch.cat([query_feat_mask, gt_idx==-1], dim=1)
+
+        # Convert proposal masks to attention masks
+        proposal_mask = F.interpolate(proposal_masks,
+            multi_scale_memorys[0].shape[-2:],
+            mode='bilinear',
+            align_corners=False)
+        proposal_mask = proposal_mask.flatten(2).unsqueeze(1).repeat(
+            (1, self.num_heads, 1, 1)).flatten(0, 1)
+        proposal_mask = (proposal_mask < 0.5).detach()
 
         # Step 2: Initialize proposal features to 0
         query_proposal_feat = torch.zeros_like(query_proposal_embed, device=query_feat.device)
@@ -498,10 +507,10 @@ class AnchorFormerHead(MaskFormerHead):
         cls_pred_list.append(cls_pred)
         mask_pred_list.append(mask_pred)
 
-        # Step 3: Set initial mask predictions for proposals to 0
+        # Step 3: Set initial predictions to 0, mask to bbox
         cls_pred[:, self.num_queries:] = 0
         mask_pred[:, self.num_queries:] = 0
-        attn_mask[:, self.num_queries:] = 0
+        attn_mask[:, self.num_queries:] = proposal_mask
 
         for i in range(self.num_transformer_decoder_layers):
             level_idx = i % self.num_transformer_feat_level

@@ -239,8 +239,10 @@ class ProposalGenerator(BaseModule):
 
         pos_enc_list = []
         gt_i_list = []
-        for gt_bboxes in gt_bboxes_list:
+        obj_masks = torch.zeros((len(gt_bboxes_list), self.max_samples, size[0], size[1]), device=gt_bboxes_list[0].device, dtype=torch.float32)
+        for batch_i, gt_bboxes in enumerate(gt_bboxes_list):
             N = gt_bboxes.shape[0]
+
             gt_centers = (gt_bboxes[:,:2] + gt_bboxes[:,2:])/2.
             pos_enc = self.pos_encoder(gt_centers, size) # N, C
 
@@ -251,6 +253,12 @@ class ProposalGenerator(BaseModule):
                 perm = torch.randperm(N, device=pos_enc.device)
                 pos_enc = pos_enc[perm]
                 gt_i = gt_i[perm]
+                gt_bboxes = gt_bboxes[perm]
+
+            # Create object masks
+            for obj_i,bbox in enumerate(gt_bboxes):
+                bbox = bbox.round().clamp(min=0).int()
+                obj_masks[batch_i, obj_i, bbox[1]:bbox[3], bbox[0]:bbox[2]] = 1.
 
             if N < self.max_samples:
                 pos_enc = F.pad(pos_enc, (0, 0, 0, self.max_samples - N))
@@ -263,7 +271,7 @@ class ProposalGenerator(BaseModule):
         pos_enc = torch.stack(pos_enc_list, dim=1)
         gt_i = torch.stack(gt_i_list)
 
-        return pos_enc.detach(), gt_i.detach()
+        return pos_enc.detach(), gt_i.detach(), obj_masks.detach()
 
 
     def forward(self, multilevel_feats, positional_encodings, gt_center_mask=None):
