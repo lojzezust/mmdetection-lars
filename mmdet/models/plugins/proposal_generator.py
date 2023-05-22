@@ -256,7 +256,7 @@ class ProposalGenerator(BaseModule):
                 gt_bboxes = gt_bboxes[perm]
 
             # Create object masks
-            for obj_i,bbox in enumerate(gt_bboxes):
+            for obj_i,bbox in enumerate(gt_bboxes[:self.max_samples]):
                 bbox = bbox.round().clamp(min=0).int()
                 obj_masks[batch_i, obj_i, bbox[1]:bbox[3], bbox[0]:bbox[2]] = 1.
 
