@@ -10,7 +10,7 @@ from mmcv.cnn.bricks.transformer import (build_positional_encoding,
 from mmcv.ops import point_sample
 from mmcv.runner import ModuleList
 
-from mmdet.core import build_assigner, build_sampler, reduce_mean
+from mmdet.core import build_assigner, build_sampler, reduce_mean, multi_apply
 from mmdet.models.utils import get_uncertain_point_coords_with_randomness
 from ..builder import HEADS, build_loss
 from .anchor_free_head import AnchorFreeHead
@@ -157,7 +157,7 @@ class AnchorFormerHead(MaskFormerHead):
                 nn.init.xavier_normal_(p)
 
     def _get_target_single(self, cls_score, mask_pred, gt_labels, gt_masks,
-                           img_metas):
+                           img_metas, gt_idx):
         """Compute classification and mask targets for one image.
 
         Args:
@@ -170,6 +170,7 @@ class AnchorFormerHead(MaskFormerHead):
             gt_masks (Tensor): Ground truth mask for each image, each with
                 shape (num_gts, h, w).
             img_metas (dict): Image informtation.
+            gt_idx (Tensor): GT indices of proposals
 
         Returns:
             tuple[Tensor]: A tuple containing the following for one image.
@@ -201,33 +202,109 @@ class AnchorFormerHead(MaskFormerHead):
         gt_points_masks = point_sample(
             gt_masks.unsqueeze(1).float(), point_coords.repeat(num_gts, 1,
                                                                1)).squeeze(1)
+        # assign proposals
+        pos_inds_p = torch.nonzero(gt_idx >= 0).squeeze(-1)
+        neg_inds_p = torch.nonzero(gt_idx < 0).squeeze(-1)
+        labels_prop = gt_labels.new_full((self.num_proposals, ), self.num_classes, dtype=torch.long)
+        labels_prop[pos_inds_p] = gt_labels[pos_inds_p]
+        label_weights_prop = gt_labels.new_ones((self.num_proposals, ))
 
-        # assign and sample
-        assign_result = self.assigner.assign(cls_score, mask_points_pred,
-                                             gt_labels, gt_points_masks,
+        mask_targets_prop = gt_masks[pos_inds_p]
+        mask_weights_prop = mask_pred.new_zeros((self.num_proposals, ))
+        mask_weights_prop[pos_inds_p] = 1.0
+
+        # Index mask for gt examples that have been matchet to a proposal
+        gt_imask = torch.zeros((len(gt_labels),), dtype=torch.bool, device=gt_labels.device)
+        gt_imask[pos_inds_p] = True
+
+        # remove gt examples that have been matched to a proposal
+        gt_labels_rem = gt_labels[~gt_imask]
+        gt_masks_rem = gt_masks[~gt_imask]
+        gt_points_masks_rem = gt_points_masks[~gt_imask]
+
+        # assign queries (remaining gt labels and queries)
+        assign_result_query = self.assigner.assign(cls_score[:self.num_queries], mask_points_pred[:self.num_queries],
+                                             gt_labels_rem, gt_points_masks_rem,
                                              img_metas)
-        sampling_result = self.sampler.sample(assign_result, mask_pred,
-                                              gt_masks)
-        pos_inds = sampling_result.pos_inds
-        neg_inds = sampling_result.neg_inds
+        sampling_result_query = self.sampler.sample(assign_result_query, mask_pred[:self.num_queries],
+                                              gt_masks_rem)
+        pos_inds_q = sampling_result_query.pos_inds
+        neg_inds_q = sampling_result_query.neg_inds
 
         # label target
-        labels = gt_labels.new_full((self.num_queries + self.num_proposals, ),
+        labels_queries = gt_labels_rem.new_full((self.num_queries, ),
                                     self.num_classes,
                                     dtype=torch.long)
-        labels[pos_inds] = gt_labels[sampling_result.pos_assigned_gt_inds]
-        label_weights = gt_labels.new_ones((self.num_queries + self.num_proposals, ))
+        labels_queries[pos_inds_q] = gt_labels_rem[sampling_result_query.pos_assigned_gt_inds]
+        label_weights_queries = gt_labels_rem.new_ones((self.num_queries, ))
 
         # mask target
-        mask_targets = gt_masks[sampling_result.pos_assigned_gt_inds]
-        mask_weights = mask_pred.new_zeros((self.num_queries + self.num_proposals, ))
-        mask_weights[pos_inds] = 1.0
+        mask_targets_queries = gt_masks_rem[sampling_result_query.pos_assigned_gt_inds]
+        mask_weights_queries = mask_pred.new_zeros((self.num_queries, ))
+        mask_weights_queries[pos_inds_q] = 1.0
+
+        # concat results for queries and proposals
+        labels = torch.cat([labels_queries, labels_prop], dim=0)
+        label_weights = torch.cat([label_weights_queries, label_weights_prop], dim=0)
+        mask_targets = torch.cat([mask_targets_queries, mask_targets_prop], dim=0)
+        mask_weights = torch.cat([mask_weights_queries, mask_weights_prop], dim=0)
+        pos_inds = torch.cat([pos_inds_q, pos_inds_p + self.num_queries], dim=0)
+        neg_inds = torch.cat([neg_inds_q, neg_inds_p + self.num_queries], dim=0)
+
 
         return (labels, label_weights, mask_targets, mask_weights, pos_inds,
                 neg_inds)
 
+
+    def get_targets(self, cls_scores_list, mask_preds_list, gt_labels_list,
+                    gt_masks_list, img_metas, gt_idx):
+        """Compute classification and mask targets for all images for a decoder
+        layer.
+
+        Args:
+            cls_scores_list (list[Tensor]): Mask score logits from a single
+                decoder layer for all images. Each with shape (num_queries,
+                cls_out_channels).
+            mask_preds_list (list[Tensor]): Mask logits from a single decoder
+                layer for all images. Each with shape (num_queries, h, w).
+            gt_labels_list (list[Tensor]): Ground truth class indices for all
+                images. Each with shape (n, ), n is the sum of number of stuff
+                type and number of instance in a image.
+            gt_masks_list (list[Tensor]): Ground truth mask for each image,
+                each with shape (n, h, w).
+            img_metas (list[dict]): List of image meta information.
+            gt_idx (Tensor): Ground truth indices for proposals.
+
+        Returns:
+            tuple[list[Tensor]]: a tuple containing the following targets.
+                - labels_list (list[Tensor]): Labels of all images.\
+                    Each with shape (num_queries, ).
+                - label_weights_list (list[Tensor]): Label weights\
+                    of all images. Each with shape (num_queries, ).
+                - mask_targets_list (list[Tensor]): Mask targets of\
+                    all images. Each with shape (num_queries, h, w).
+                - mask_weights_list (list[Tensor]): Mask weights of\
+                    all images. Each with shape (num_queries, ).
+                - num_total_pos (int): Number of positive samples in\
+                    all images.
+                - num_total_neg (int): Number of negative samples in\
+                    all images.
+        """
+        (labels_list, label_weights_list, mask_targets_list, mask_weights_list,
+         pos_inds_list,
+         neg_inds_list) = multi_apply(self._get_target_single, cls_scores_list,
+                                      mask_preds_list, gt_labels_list,
+                                      gt_masks_list, img_metas, gt_idx)
+
+        num_total_pos = sum((inds.numel() for inds in pos_inds_list))
+        num_total_neg = sum((inds.numel() for inds in neg_inds_list))
+        return (labels_list, label_weights_list, mask_targets_list,
+                mask_weights_list, num_total_pos, num_total_neg)
+
+
+
     def loss_single(self, cls_scores, mask_preds, gt_labels_list,
-                    gt_masks_list, img_metas):
+                    gt_masks_list, img_metas, gt_idx):
         """Loss function for outputs from a single decoder layer.
 
         Args:
@@ -242,6 +319,7 @@ class AnchorFormerHead(MaskFormerHead):
             gt_masks_list (list[Tensor]): Ground truth mask for each image,
                 each with shape (num_gts, h, w).
             img_metas (list[dict]): List of image meta information.
+            gt_idx (Tensor): Ground truth indices for proposals.
 
         Returns:
             tuple[Tensor]: Loss components for outputs from a single \
@@ -254,7 +332,7 @@ class AnchorFormerHead(MaskFormerHead):
          num_total_pos,
          num_total_neg) = self.get_targets(cls_scores_list, mask_preds_list,
                                            gt_labels_list, gt_masks_list,
-                                           img_metas)
+                                           img_metas, gt_idx)
         # shape (batch_size, num_queries)
         labels = torch.stack(labels_list, dim=0)
         # shape (batch_size, num_queries)
@@ -318,11 +396,31 @@ class AnchorFormerHead(MaskFormerHead):
         return loss_cls, loss_mask, loss_dice
 
     def loss(self, all_cls_scores, all_mask_preds, center_preds,
-             gt_labels_list, gt_masks_list, gt_centers, img_metas):
+             gt_labels_list, gt_masks_list, gt_centers, img_metas, gt_idx):
 
         # Compute Mask2Former losses
-        loss_dict = super().loss(all_cls_scores, all_mask_preds, gt_labels_list,
-                        gt_masks_list, img_metas)
+        num_dec_layers = len(all_cls_scores)
+        all_gt_labels_list = [gt_labels_list for _ in range(num_dec_layers)]
+        all_gt_masks_list = [gt_masks_list for _ in range(num_dec_layers)]
+        img_metas_list = [img_metas for _ in range(num_dec_layers)]
+        gt_idx_list = [gt_idx for _ in range(num_dec_layers)]
+        losses_cls, losses_mask, losses_dice = multi_apply(
+            self.loss_single, all_cls_scores, all_mask_preds,
+            all_gt_labels_list, all_gt_masks_list, img_metas_list, gt_idx_list)
+
+        loss_dict = dict()
+        # loss from the last decoder layer
+        loss_dict['loss_cls'] = losses_cls[-1]
+        loss_dict['loss_mask'] = losses_mask[-1]
+        loss_dict['loss_dice'] = losses_dice[-1]
+        # loss from other decoder layers
+        num_dec_layer = 0
+        for loss_cls_i, loss_mask_i, loss_dice_i in zip(
+                losses_cls[:-1], losses_mask[:-1], losses_dice[:-1]):
+            loss_dict[f'd{num_dec_layer}.loss_cls'] = loss_cls_i
+            loss_dict[f'd{num_dec_layer}.loss_mask'] = loss_mask_i
+            loss_dict[f'd{num_dec_layer}.loss_dice'] = loss_dice_i
+            num_dec_layer += 1
 
         # Add loss for proposal generator
         loss_dict['loss_center'] = self.proposal_head.loss(center_preds, gt_centers)
@@ -420,12 +518,12 @@ class AnchorFormerHead(MaskFormerHead):
                                                  gt_semantic_seg, img_metas, gt_centers)
 
         # forward
-        all_cls_scores, all_mask_preds, center_preds = self(feats, img_metas, gt_centers=gt_center_masks, gt_bboxes=gt_bboxes)
+        all_cls_scores, all_mask_preds, center_preds, gt_idx = self(feats, img_metas, gt_centers=gt_center_masks, gt_bboxes=gt_bboxes)
 
 
         # loss
         losses = self.loss(all_cls_scores, all_mask_preds, center_preds,
-                           gt_labels, gt_masks, gt_center_masks, img_metas)
+                           gt_labels, gt_masks, gt_center_masks, img_metas, gt_idx)
 
         return losses
 
@@ -538,7 +636,7 @@ class AnchorFormerHead(MaskFormerHead):
             cls_pred_list.append(cls_pred)
             mask_pred_list.append(mask_pred)
 
-        return cls_pred_list, mask_pred_list, center_preds
+        return cls_pred_list, mask_pred_list, center_preds, gt_idx
 
     def simple_test(self, feats, img_metas, gt_centers=None, gt_bboxes=None, **kwargs):
         """Test without augmentaton.
@@ -559,7 +657,7 @@ class AnchorFormerHead(MaskFormerHead):
         """
 
         gt_centers = gt_centers[0].unsqueeze(1)
-        all_cls_scores, all_mask_preds, center_preds = self(feats, img_metas, gt_centers, gt_bboxes[0])
+        all_cls_scores, all_mask_preds, center_preds, gt_idx = self(feats, img_metas, gt_centers, gt_bboxes[0])
         mask_cls_results = all_cls_scores[-1]
         mask_pred_results = all_mask_preds[-1]
 
