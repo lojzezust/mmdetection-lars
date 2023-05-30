@@ -585,17 +585,20 @@ class AnchorFormerHead(MaskFormerHead):
         query_embed = torch.cat([query_embed, query_proposal_embed], dim=0) # (num_queries + num_proposals, batch_size, c)
         query_feat_mask = torch.cat([query_feat_mask, gt_idx==-1], dim=1)
 
-        # Convert proposal masks to attention masks
+        # Scale to feature size
         proposal_mask = F.interpolate(proposal_masks,
             multi_scale_memorys[0].shape[-2:],
-            mode='bilinear',
-            align_corners=False)
-        proposal_mask = proposal_mask.flatten(2).unsqueeze(1).repeat(
-            (1, self.num_heads, 1, 1)).flatten(0, 1)
-        proposal_mask = (proposal_mask < 0.5).detach()
+            mode='area')
 
-        # Step 2: Initialize proposal features to 0
-        query_proposal_feat = torch.zeros_like(query_proposal_embed, device=query_feat.device)
+        # Convert proposal masks to attention masks
+        proposal_mask_t = proposal_mask.flatten(2).unsqueeze(1).repeat(
+            (1, self.num_heads, 1, 1)).flatten(0, 1)
+        proposal_mask_t = (proposal_mask_t < 0.5).detach()
+
+        # Step 2: Initialize proposal features by pooling features inside bbox
+        masked_feats = (proposal_mask > 0).float().unsqueeze(2) * multi_scale_memorys[0].unsqueeze(1)
+        query_proposal_feat = masked_feats.sum(dim=(3,4)) / (proposal_mask.sum(dim=(2,3)).unsqueeze(2) + 1e-6)
+        query_proposal_feat = query_proposal_feat.permute(1,0,2).detach() # (num_proposals, batch_size, c)
         query_feat = torch.cat([query_feat, query_proposal_feat], dim=0) # (num_queries + num_proposals, batch_size, c)
 
         cls_pred_list = []
@@ -608,7 +611,7 @@ class AnchorFormerHead(MaskFormerHead):
         # Step 3: Set initial predictions to 0, mask to bbox
         cls_pred[:, self.num_queries:] = 0
         mask_pred[:, self.num_queries:] = 0
-        attn_mask[:, self.num_queries:] = proposal_mask
+        attn_mask[:, self.num_queries:] = proposal_mask_t
 
         for i in range(self.num_transformer_decoder_layers):
             level_idx = i % self.num_transformer_feat_level
