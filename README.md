@@ -1,4 +1,4 @@
-### MMDetection-LaRS
+# MMDetection-LaRS
 
 Fork of [MMDetection](https://github.com/open-mmlab/mmdetection) with support for training on LaRS Panoptic dataset.
 
